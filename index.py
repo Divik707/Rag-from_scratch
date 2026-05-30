@@ -1,5 +1,6 @@
+import keyword
 from document import DOCUMENTS
-from typing import List
+from typing import List, Tuple
 from dotenv import load_dotenv
 import os
 import chromadb
@@ -83,7 +84,7 @@ if(emb):
 else :
         print("storage failed")    
 
-def naive_rag(question: str,  k: int = 3, verbose : bool = True) -> str:
+def naive_rag(question: str,  k: int = 10, verbose : bool = True) -> str:
     question_emb = embeddings([question])
 
     result = collection.query(
@@ -98,8 +99,9 @@ def naive_rag(question: str,  k: int = 3, verbose : bool = True) -> str:
     if verbose:
         print(f"\n Query: {question}")
         for i, (d, m, di) in enumerate(zip(docs, meta, dis)):
-            print(f"index: [ {i + 1} ] | Similarity: {1-di:.2f} | Sources: {m.get('source')}")
-    context = '\n\n'.join([f"Source: {m.get('source')} \n {d}" for d, m in zip(docs, meta)])        
+            print(f"index: [ {i + 1} ] | Similarity: {1-di:.4f} | Sources: {m.get('source')}")
+    context = '\n\n'.join([f"Source: {m.get('source')} \n {d}" for d, m in zip(docs, meta)]) 
+
 
     resp = client.chat.completions.create(
         model = "openai/gpt-4o-mini",
@@ -111,4 +113,31 @@ def naive_rag(question: str,  k: int = 3, verbose : bool = True) -> str:
     )
     return resp.choices[0].message.content
 
-(naive_rag("how much is my office stipend"))
+print(naive_rag("how much is my office stipend"))
+
+
+
+from rank_bm25 import BM25Okapi
+import re
+
+def tokenizer(text: str) -> List[str]:
+    return re.findall(r'\w+', text.lower())
+
+bm25 =  BM25Okapi([tokenizer(c) for c in all_chunks])
+print(f"build bm25 indexes over {len(all_chunks)}")    
+
+
+def rank_reciprocal_fusion(semantics: List[Tuple[int, float]], keyoword: List[Tuple[int, float]], k:int = 60) -> List[Tuple[int, float]] :
+
+    scores = {}
+
+    for rank, (idx, _ ) in enumerate(semantics):
+        scores[idx] = scores.get(idx, 0) + 1 / ( rank + 1 + k )
+
+
+    for rank, (idx, _ ) in enumerate(keyword):
+        scores[idx] = scores.get(idx, 0) + 1 / ( rank + 1 + k)
+
+    return sorted(scores.item(), key=lambda x:x[1], reverse = True)
+
+
