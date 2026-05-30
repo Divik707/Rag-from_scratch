@@ -9,9 +9,6 @@ import re
 
 load_dotenv()
 
-# -----------------------------
-# Chunking
-# -----------------------------
 def chunking(text: str, max_size: int = 200) -> List[str]:
     chunks = []
 
@@ -56,10 +53,6 @@ def chunking(text: str, max_size: int = 200) -> List[str]:
 
     return [c for c in chunks if len(c.split()) > 3]
 
-
-# -----------------------------
-# Create chunks
-# -----------------------------
 all_chunks = []
 
 for doc in DOCUMENTS:
@@ -69,9 +62,6 @@ for doc in DOCUMENTS:
 print(f"Created {len(all_chunks)} chunks")
 
 
-# -----------------------------
-# OpenRouter Client
-# -----------------------------
 OPENROUTER_API = os.getenv("OPENROUTER_API")
 
 client = OpenAI(
@@ -79,10 +69,8 @@ client = OpenAI(
     base_url="https://openrouter.ai/api/v1/"
 )
 
+import traceback
 
-# -----------------------------
-# Embeddings
-# -----------------------------
 def embeddings(
     texts: List[str],
     model: str = "openai/text-embedding-3-small"
@@ -102,14 +90,13 @@ def embeddings(
 
         return [x.embedding for x in response.data]
 
-    except Exception as e:
-        print("Embedding Error:", e)
+    except Exception:
+        print("\n===== EMBEDDING ERROR =====")
+        traceback.print_exc()
+        print("===========================\n")
         return []
 
 
-# -----------------------------
-# ChromaDB
-# -----------------------------
 chroma = chromadb.Client()
 
 try:
@@ -144,9 +131,6 @@ else:
     print("Storage failed")
 
 
-# -----------------------------
-# BM25
-# -----------------------------
 def tokenizer(text: str) -> List[str]:
     return re.findall(r"\w+", text.lower())
 
@@ -158,9 +142,6 @@ bm25 = BM25Okapi(
 print(f"Built BM25 index over {len(all_chunks)} chunks")
 
 
-# -----------------------------
-# RRF
-# -----------------------------
 def rank_reciprocal_fusion(
     semantics: List[Tuple[int, float]],
     keyword: List[Tuple[int, float]],
@@ -190,15 +171,11 @@ def rank_reciprocal_fusion(
     )
 
 
-# -----------------------------
-# Hybrid Search
-# -----------------------------
 def hybrid_search(
     question: str,
     k: int = 5
 ) -> List[Dict]:
 
-    # Semantic Search
     question_emb = embeddings([question])
 
     sem = collection.query(
@@ -219,7 +196,6 @@ def hybrid_search(
         )
     ]
 
-    # BM25 Search
     bm25_scores = bm25.get_scores(
         tokenizer(question)
     )
@@ -230,7 +206,6 @@ def hybrid_search(
         reverse=True
     )[:20]
 
-    # Fusion
     fused = rank_reciprocal_fusion(
         sem_ranked,
         bm25_ranked
@@ -247,12 +222,8 @@ def hybrid_search(
         for idx, score in fused[:k]
     ]
 
-
-# -----------------------------
-# Test
-# -----------------------------
 results = hybrid_search(
-    "How many therapy sessions do I get?"
+    "tell me about gupta empire"
 )
 
 for r in results:
@@ -261,3 +232,5 @@ for r in results:
         f"Score: {r['score']:.4f} | "
         f"{r['chunk'][:80]}..."
     )
+
+
