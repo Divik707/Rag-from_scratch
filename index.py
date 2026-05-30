@@ -1,8 +1,8 @@
-from math import e
 from document import DOCUMENTS
 from typing import List
 from dotenv import load_dotenv
 import os
+import chromadb
 from openai import OpenAI
 
 load_dotenv()
@@ -39,18 +39,15 @@ all_chunks = []
 for doc in DOCUMENTS:
     doc_chunk = chunking(doc["content"])
     all_chunks.extend(doc_chunk)
-
-
-print(f"created {len(all_chunks)} from the documents")
+print(f"created {len(all_chunks)} chunk from the documents")
 
 Openrouter_api = os.getenv("OPENROUTER_API")
-
 client = OpenAI(
     api_key=Openrouter_api,
     base_url="https://openrouter.ai/api/v1/"
 )
 
-def embeddings(text: List[str], model: str= "text-embedding-3-small") -> List[List[float]] :
+def embeddings(text: List[str], model: str= "openai/text-embedding-3-small") -> List[List[float]] :
     cleaned = [t.replace("\n", " ").strip() for t in text] 
 
     try:
@@ -61,8 +58,57 @@ def embeddings(text: List[str], model: str= "text-embedding-3-small") -> List[Li
         print(f" exception : {e}")
         return []     
 
-print(f"creating embedding for {len(all_chunks)} chunks")
+chroma = chromadb.Client()
 
-chunk_vector = embeddings(all_chunks)
-if chunk_vector and len(chunk_vector) > 0:
-    print(f"chunks embeddings created {len(chunk_vector)}")
+try:
+    chroma.delete_collection("naive_rag")
+except:
+    pass
+collection = chroma.create_collection(
+        name="naive_rag",
+        metadata={"hnsw:space": "cosine"}
+    )   
+chunk_meta_data = [{"source": "AetherSoft_Handbook"} for _ in all_chunks]
+
+emb = embeddings(all_chunks)
+
+if(emb):
+        collection.add(
+            ids=[f"chunk {i}" for i in range(len(all_chunks))],
+            embeddings=emb,
+            documents=all_chunks,
+            metadatas=chunk_meta_data
+        )
+        print(f"stored vector: {len(emb)}" )
+else :
+        print("storage failed")    
+
+def naive_rag(question: str,  k: int = 3, verbose : bool = True) -> str:
+    question_emb = embeddings([question])
+
+    result = collection.query(
+        query_embeddings=question_emb,
+        n_results=k
+    )
+
+    docs = result["documents"][0]
+    meta = result["metadatas"][0] if result["metadatas"] else [{"source": "AetherSoft_Handbook"}] * len(docs)
+    dis = result["distances"][0]
+
+    if verbose:
+        print(f"\n Query: {question}")
+        for i, (d, m, di) in enumerate(zip(docs, meta, dis)):
+            print(f"index: [ {i + 1} ] | Similarity: {1-di:.2f} | Sources: {m.get('source')}")
+    context = '\n\n'.join([f"Source: {m.get('source')} \n {d}" for d, m in zip(docs, meta)])        
+
+    resp = client.chat.completions.create(
+        model = "openai/gpt-4o-mini",
+        messages= [
+            {"role": "system", "content": "Answer based ONLY on context. Cite sources."},
+            {"role": "user", "content": f"Context:\n{context}\n\nQuestion: {question}"}
+        ],
+        temperature=0
+    )
+    return resp.choices[0].message.content
+
+(naive_rag("how much is my office stipend"))
