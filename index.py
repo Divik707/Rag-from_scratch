@@ -1,143 +1,263 @@
-import keyword
 from document import DOCUMENTS
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 from dotenv import load_dotenv
 import os
 import chromadb
 from openai import OpenAI
+from rank_bm25 import BM25Okapi
+import re
 
 load_dotenv()
 
-def chunking(text: str, max_size: int=200) -> List[str]:
+# -----------------------------
+# Chunking
+# -----------------------------
+def chunking(text: str, max_size: int = 200) -> List[str]:
     chunks = []
-    paragraphs = [p.strip() for p in text.split('\n\n') if p.strip()]
+
+    paragraphs = [
+        p.strip()
+        for p in text.split("\n\n")
+        if p.strip()
+    ]
 
     for para in paragraphs:
+
         if len(para) <= max_size:
             chunks.append(para)
-        else :
-            sentences = para.replace('.', '.\n').split('\n');
-            current, current_len = [], 0
+
+        else:
+            sentences = para.replace(".", ".\n").split("\n")
+
+            current = []
+            current_len = 0
 
             for sent in sentences:
+
                 sent = sent.strip()
 
                 if not sent:
                     continue
+
                 if current_len + len(sent) <= max_size:
                     current.append(sent)
                     current_len += len(sent)
-                else :
-                    if current :
+
+                else:
+
+                    if current:
                         chunks.append(" ".join(current))
-                    current_len = len(sent) 
-                    current = [sent]   
+
+                    current = [sent]
+                    current_len = len(sent)
+
             if current:
                 chunks.append(" ".join(current))
-    return [c for c in chunks if len(c.split()) > 3]                   
 
+    return [c for c in chunks if len(c.split()) > 3]
+
+
+# -----------------------------
+# Create chunks
+# -----------------------------
 all_chunks = []
-for doc in DOCUMENTS:
-    doc_chunk = chunking(doc["content"])
-    all_chunks.extend(doc_chunk)
-print(f"created {len(all_chunks)} chunk from the documents")
 
-Openrouter_api = os.getenv("OPENROUTER_API")
+for doc in DOCUMENTS:
+    doc_chunks = chunking(doc["content"])
+    all_chunks.extend(doc_chunks)
+
+print(f"Created {len(all_chunks)} chunks")
+
+
+# -----------------------------
+# OpenRouter Client
+# -----------------------------
+OPENROUTER_API = os.getenv("OPENROUTER_API")
+
 client = OpenAI(
-    api_key=Openrouter_api,
+    api_key=OPENROUTER_API,
     base_url="https://openrouter.ai/api/v1/"
 )
 
-def embeddings(text: List[str], model: str= "openai/text-embedding-3-small") -> List[List[float]] :
-    cleaned = [t.replace("\n", " ").strip() for t in text] 
+
+# -----------------------------
+# Embeddings
+# -----------------------------
+def embeddings(
+    texts: List[str],
+    model: str = "openai/text-embedding-3-small"
+) -> List[List[float]]:
+
+    cleaned = [
+        t.replace("\n", " ").strip()
+        for t in texts
+    ]
 
     try:
-        response = client.embeddings.create(input=cleaned, model=model)
-        vectors = [i.embedding for i in response.data]
-        return vectors
-    except Exception as e : 
-        print(f" exception : {e}")
-        return []     
 
+        response = client.embeddings.create(
+            input=cleaned,
+            model=model
+        )
+
+        return [x.embedding for x in response.data]
+
+    except Exception as e:
+        print("Embedding Error:", e)
+        return []
+
+
+# -----------------------------
+# ChromaDB
+# -----------------------------
 chroma = chromadb.Client()
 
 try:
     chroma.delete_collection("naive_rag")
 except:
     pass
+
 collection = chroma.create_collection(
-        name="naive_rag",
-        metadata={"hnsw:space": "cosine"}
-    )   
-chunk_meta_data = [{"source": "AetherSoft_Handbook"} for _ in all_chunks]
+    name="naive_rag",
+    metadata={"hnsw:space": "cosine"}
+)
 
-emb = embeddings(all_chunks)
+chunk_meta_data = [
+    {"source": "AetherSoft_Handbook"}
+    for _ in all_chunks
+]
 
-if(emb):
-        collection.add(
-            ids=[f"chunk {i}" for i in range(len(all_chunks))],
-            embeddings=emb,
-            documents=all_chunks,
-            metadatas=chunk_meta_data
-        )
-        print(f"stored vector: {len(emb)}" )
-else :
-        print("storage failed")    
+chunk_embeddings = embeddings(all_chunks)
 
-def naive_rag(question: str,  k: int = 10, verbose : bool = True) -> str:
-    question_emb = embeddings([question])
+if chunk_embeddings:
 
-    result = collection.query(
-        query_embeddings=question_emb,
-        n_results=k
+    collection.add(
+        ids=[f"chunk {i}" for i in range(len(all_chunks))],
+        embeddings=chunk_embeddings,
+        documents=all_chunks,
+        metadatas=chunk_meta_data
     )
 
-    docs = result["documents"][0]
-    meta = result["metadatas"][0] if result["metadatas"] else [{"source": "AetherSoft_Handbook"}] * len(docs)
-    dis = result["distances"][0]
+    print(f"Stored {len(chunk_embeddings)} vectors")
 
-    if verbose:
-        print(f"\n Query: {question}")
-        for i, (d, m, di) in enumerate(zip(docs, meta, dis)):
-            print(f"index: [ {i + 1} ] | Similarity: {1-di:.4f} | Sources: {m.get('source')}")
-    context = '\n\n'.join([f"Source: {m.get('source')} \n {d}" for d, m in zip(docs, meta)]) 
+else:
+    print("Storage failed")
 
 
-    resp = client.chat.completions.create(
-        model = "openai/gpt-4o-mini",
-        messages= [
-            {"role": "system", "content": "Answer based ONLY on context. Cite sources."},
-            {"role": "user", "content": f"Context:\n{context}\n\nQuestion: {question}"}
-        ],
-        temperature=0
-    )
-    return resp.choices[0].message.content
-
-print(naive_rag("how much is my office stipend"))
-
-
-
-from rank_bm25 import BM25Okapi
-import re
-
+# -----------------------------
+# BM25
+# -----------------------------
 def tokenizer(text: str) -> List[str]:
-    return re.findall(r'\w+', text.lower())
-
-bm25 =  BM25Okapi([tokenizer(c) for c in all_chunks])
-print(f"build bm25 indexes over {len(all_chunks)}")    
+    return re.findall(r"\w+", text.lower())
 
 
-def rank_reciprocal_fusion(semantics: List[Tuple[int, float]], keyoword: List[Tuple[int, float]], k:int = 60) -> List[Tuple[int, float]] :
+bm25 = BM25Okapi(
+    [tokenizer(chunk) for chunk in all_chunks]
+)
+
+print(f"Built BM25 index over {len(all_chunks)} chunks")
+
+
+# -----------------------------
+# RRF
+# -----------------------------
+def rank_reciprocal_fusion(
+    semantics: List[Tuple[int, float]],
+    keyword: List[Tuple[int, float]],
+    k: int = 60
+) -> List[Tuple[int, float]]:
 
     scores = {}
 
-    for rank, (idx, _ ) in enumerate(semantics):
-        scores[idx] = scores.get(idx, 0) + 1 / ( rank + 1 + k )
+    for rank, (idx, _) in enumerate(semantics):
+
+        scores[idx] = (
+            scores.get(idx, 0)
+            + 1 / (rank + k + 1)
+        )
+
+    for rank, (idx, _) in enumerate(keyword):
+
+        scores[idx] = (
+            scores.get(idx, 0)
+            + 1 / (rank + k + 1)
+        )
+
+    return sorted(
+        scores.items(),
+        key=lambda x: x[1],
+        reverse=True
+    )
 
 
-    for rank, (idx, _ ) in enumerate(keyword):
-        scores[idx] = scores.get(idx, 0) + 1 / ( rank + 1 + k)
+# -----------------------------
+# Hybrid Search
+# -----------------------------
+def hybrid_search(
+    question: str,
+    k: int = 5
+) -> List[Dict]:
 
-    return sorted(scores.item(), key=lambda x:x[1], reverse = True)
+    # Semantic Search
+    question_emb = embeddings([question])
+
+    sem = collection.query(
+        query_embeddings=question_emb,
+        n_results=20
+    )
+
+    sem_ranked = [
+
+        (
+            int(chunk_id.split(" ")[1]),
+            dist
+        )
+
+        for chunk_id, dist in zip(
+            sem["ids"][0],
+            sem["distances"][0]
+        )
+    ]
+
+    # BM25 Search
+    bm25_scores = bm25.get_scores(
+        tokenizer(question)
+    )
+
+    bm25_ranked = sorted(
+        enumerate(bm25_scores),
+        key=lambda x: x[1],
+        reverse=True
+    )[:20]
+
+    # Fusion
+    fused = rank_reciprocal_fusion(
+        sem_ranked,
+        bm25_ranked
+    )
+
+    return [
+
+        {
+            "chunk": all_chunks[idx],
+            "meta": chunk_meta_data[idx],
+            "score": score
+        }
+
+        for idx, score in fused[:k]
+    ]
 
 
+# -----------------------------
+# Test
+# -----------------------------
+results = hybrid_search(
+    "How many therapy sessions do I get?"
+)
+
+for r in results:
+
+    print(
+        f"Score: {r['score']:.4f} | "
+        f"{r['chunk'][:80]}..."
+    )
